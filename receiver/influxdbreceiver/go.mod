@@ -1,4 +1,5 @@
-module github.com/open-telemetry/opentelemetry-collector-contrib/receiver/influxdbreceiver
+// module github.com/open-telemetry/opentelemetry-collector-contrib/receiver/influxdbreceiver
+module github.com/domleb/opentelemetry-collector-contrib/receiver/influxdbreceiver
 
 go 1.23.0
 
