@@ -5,6 +5,7 @@ package influxdbreceiver // import "github.com/open-telemetry/opentelemetry-coll
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -140,12 +141,17 @@ func (r *metricsReceiver) handleWrite(w http.ResponseWriter, req *http.Request) 
 
 	var k, vTag []byte
 	var vField lineprotocol.Value
-	for line := 0; lpDecoder.Next(); line++ {
+
+	line := 0
+	failureReason := make(map[string]int)
+
+	for ; lpDecoder.Next(); line++ {
 		measurement, err := lpDecoder.Measurement()
 		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = fmt.Fprintf(w, "failed to parse measurement on line %d", line)
-			return
+			m := "failed to parse measurement"
+			failureReason[m]++
+			r.logger.Debug("%s: %s", m, err)
+			continue
 		}
 
 		tags := make(map[string]string)
@@ -153,9 +159,10 @@ func (r *metricsReceiver) handleWrite(w http.ResponseWriter, req *http.Request) 
 			tags[string(k)] = string(vTag)
 		}
 		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = fmt.Fprintf(w, "failed to parse tag on line %d", line)
-			return
+			m := "failed to parse tag"
+			failureReason[m]++
+			r.logger.Debug("%s: %s", m, err)
+			continue
 		}
 
 		fields := make(map[string]any)
@@ -163,29 +170,33 @@ func (r *metricsReceiver) handleWrite(w http.ResponseWriter, req *http.Request) 
 			fields[string(k)] = vField.Interface()
 		}
 		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = fmt.Fprintf(w, "failed to parse field on line %d", line)
-			return
+			m := "failed to parse field"
+			failureReason[m]++
+			r.logger.Debug("%s: %s", m, err)
+			continue
 		}
 
 		ts, err := lpDecoder.Time(precision, time.Time{})
 		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = fmt.Fprintf(w, "failed to parse timestamp on line %d", line)
-			return
+			m := "failed to parse timestamp"
+			failureReason[m]++
+			r.logger.Debug("%s: %s", m, err)
+			continue
 		}
 
 		if err = lpDecoder.Err(); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = fmt.Fprintf(w, "failed to parse line: %s", err.Error())
-			return
+			m := "failed to parse line"
+			failureReason[m]++
+			r.logger.Debug("%s: %s", m, err)
+			continue
 		}
 
 		err = batch.AddPoint(string(measurement), tags, fields, ts, common.InfluxMetricValueTypeUntyped)
 		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = fmt.Fprintf(w, "failed to append to the batch: %v", err)
-			return
+			m := "failed to append to the batch"
+			failureReason[m]++
+			r.logger.Debug("%s: %s", m, err)
+			continue
 		}
 	}
 
@@ -198,6 +209,23 @@ func (r *metricsReceiver) handleWrite(w http.ResponseWriter, req *http.Request) 
 			w.WriteHeader(http.StatusInternalServerError)
 		}
 		r.logger.Debug("failed to pass metrics to next consumer: %s", err)
+		return
+	}
+
+	if len(failureReason) > 0 {
+		totalErrors := 0
+		for _, count := range failureReason {
+			totalErrors += count
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		response := map[string]any{
+			"total_success":  line - totalErrors,
+			"total_failure":  totalErrors,
+			"failure_reason": failureReason,
+		}
+		_ = json.NewEncoder(w).Encode(response)
+		r.logger.Debug("failed to parse %d of %d lines", totalErrors, line)
 		return
 	}
 
