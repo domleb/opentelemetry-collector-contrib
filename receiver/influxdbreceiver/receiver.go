@@ -5,9 +5,11 @@ package influxdbreceiver // import "github.com/open-telemetry/opentelemetry-coll
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,6 +40,8 @@ type metricsReceiver struct {
 	obsrecv *receiverhelper.ObsReport
 
 	settings component.TelemetrySettings
+
+	config *Config
 }
 
 func newMetricsReceiver(config *Config, settings receiver.Settings, nextConsumer consumer.Metrics) (*metricsReceiver, error) {
@@ -62,6 +66,7 @@ func newMetricsReceiver(config *Config, settings receiver.Settings, nextConsumer
 		logger:             influxLogger,
 		obsrecv:            obsrecv,
 		settings:           settings.TelemetrySettings,
+		config:             config,
 	}, err
 }
 
@@ -140,12 +145,20 @@ func (r *metricsReceiver) handleWrite(w http.ResponseWriter, req *http.Request) 
 
 	var k, vTag []byte
 	var vField lineprotocol.Value
-	for line := 0; lpDecoder.Next(); line++ {
+
+	line := 0
+	batchDrops := NewBatchDrops(r.config.MaxTrackedErrors)
+
+	for ; lpDecoder.Next(); line++ {
 		measurement, err := lpDecoder.Measurement()
 		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = fmt.Fprintf(w, "failed to parse measurement on line %d", line)
-			return
+			if !r.config.EnablePartialWrites {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = fmt.Fprintf(w, "failed to parse measurement on line %d", line)
+				return
+			}
+			batchDrops.AddDrop(FailedMeasurement, line)
+			continue
 		}
 
 		tags := make(map[string]string)
@@ -153,9 +166,13 @@ func (r *metricsReceiver) handleWrite(w http.ResponseWriter, req *http.Request) 
 			tags[string(k)] = string(vTag)
 		}
 		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = fmt.Fprintf(w, "failed to parse tag on line %d", line)
-			return
+			if !r.config.EnablePartialWrites {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = fmt.Fprintf(w, "failed to parse tag for '%s' on line %d", measurement, line)
+				return
+			}
+			batchDrops.AddDrop(FailedTag, line, string(measurement))
+			continue
 		}
 
 		fields := make(map[string]any)
@@ -163,29 +180,45 @@ func (r *metricsReceiver) handleWrite(w http.ResponseWriter, req *http.Request) 
 			fields[string(k)] = vField.Interface()
 		}
 		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = fmt.Fprintf(w, "failed to parse field on line %d", line)
-			return
+			if !r.config.EnablePartialWrites {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = fmt.Fprintf(w, "failed to parse field for '%s' on line %d", measurement, line)
+				return
+			}
+			batchDrops.AddDrop(FailedField, line, string(measurement))
+			continue
 		}
 
 		ts, err := lpDecoder.Time(precision, time.Time{})
 		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = fmt.Fprintf(w, "failed to parse timestamp on line %d", line)
-			return
+			if !r.config.EnablePartialWrites {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = fmt.Fprintf(w, "failed to parse timestamp for '%s' on line %d", measurement, line)
+				return
+			}
+			batchDrops.AddDrop(FailedTimestamp, line, string(measurement))
+			continue
 		}
 
 		if err = lpDecoder.Err(); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = fmt.Fprintf(w, "failed to parse line: %s", err.Error())
-			return
+			if !r.config.EnablePartialWrites {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = fmt.Fprintf(w, "failed to parse '%s' on line %d: %s", measurement, line, err.Error())
+				return
+			}
+			batchDrops.AddDrop(FailedDecoder, line, string(measurement), err.Error())
+			continue
 		}
 
 		err = batch.AddPoint(string(measurement), tags, fields, ts, common.InfluxMetricValueTypeUntyped)
 		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = fmt.Fprintf(w, "failed to append to the batch: %v", err)
-			return
+			if !r.config.EnablePartialWrites {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = fmt.Fprintf(w, "failed to add '%s' on line %d to the batch: %s", measurement, line, err.Error())
+				return
+			}
+			batchDrops.AddDrop(FailedBatchAdd, line, string(measurement), err.Error())
+			continue
 		}
 	}
 
@@ -198,6 +231,40 @@ func (r *metricsReceiver) handleWrite(w http.ResponseWriter, req *http.Request) 
 			w.WriteHeader(http.StatusInternalServerError)
 		}
 		r.logger.Debug("failed to pass metrics to next consumer: %s", err)
+		return
+	}
+
+	if batchDrops.Count() > 0 {
+		response := map[string]any{
+			"error":   strings.Join(batchDrops.Errors(), ","),
+			"dropped": batchDrops.Count(),
+			"total":   line,
+			"summary": batchDrops.Reasons(),
+		}
+
+		errorPrefix := "partial write"
+		if batchDrops.Count() >= line {
+			errorPrefix = "failed write"
+		}
+
+		if response["error"] != "" {
+			response["error"] = errorPrefix + ": " + response["error"].(string)
+		} else {
+			response["error"] = errorPrefix
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(response)
+
+		summary, _ := json.Marshal(batchDrops.Reasons())
+		r.logger.Debug(fmt.Sprintf(
+			"failed to add %d of %d lines to the batch %s: %s",
+			batchDrops.Count(),
+			line,
+			string(summary),
+			strings.Join(batchDrops.Errors(), ","),
+		))
 		return
 	}
 

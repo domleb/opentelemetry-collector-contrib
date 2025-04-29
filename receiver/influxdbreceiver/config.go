@@ -10,4 +10,6 @@ import (
 // Config defines configuration for the InfluxDB receiver.
 type Config struct {
 	confighttp.ServerConfig `mapstructure:",squash"`
+	EnablePartialWrites     bool `mapstructure:"enable_partial_writes"`
+	MaxTrackedErrors        int  `mapstructure:"max_tracked_errors"`
 }
