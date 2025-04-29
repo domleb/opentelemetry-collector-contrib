@@ -20,7 +20,7 @@ Write query parameter `precision` is optional, defaults to `ns`.
 
 Write responses:
 - 204: success, no further response needed (no content)
-- 400: permanent failure; check response body for details
+- 400: permanent failure; check response body for details, including partial writes
 - 500: retryable error; check response body for details
 
 ## Configuration
@@ -28,6 +28,8 @@ Write responses:
 The following configuration options are supported:
 
 * `endpoint` (default = localhost:8086) HTTP service endpoint for the line protocol receiver. See our [security best practices doc](https://opentelemetry.io/docs/security/config-best-practices/#protect-against-denial-of-service-attacks) to understand how to set the endpoint in different environments.
+* `enable_partial_writes` (default = false) Enable partial writes.  This replicates the behavior of InfluxDB by writing any lines in the batch that are valid.
+* `max_tracked_errors` (default = 0) Track and return errors details for each line that was dropped from the batch.  This replicates the behavior of InfluxDB and for performance reasons it can be limited.
 
 The full list of settings exposed for this receiver are documented in [config.go](config.go).
 
@@ -36,6 +38,9 @@ Example:
 receivers:
   influxdb:
     endpoint: 0.0.0.0:8080
+    enable_partial_writes: false
+    max_tracked_errors: 0
+
 ```
 
 ## Definitions
