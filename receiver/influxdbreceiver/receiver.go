@@ -145,6 +145,7 @@ func (r *metricsReceiver) handleWrite(w http.ResponseWriter, req *http.Request) 
 
 	var k, vTag []byte
 	var vField lineprotocol.Value
+	var vFieldConverted lineprotocol.Value
 
 	line := 0
 	batchDrops := NewBatchDrops(r.config.MaxTrackedErrors)
@@ -177,7 +178,21 @@ func (r *metricsReceiver) handleWrite(w http.ResponseWriter, req *http.Request) 
 
 		fields := make(map[string]any)
 		for k, vField, err = lpDecoder.NextField(); k != nil && err == nil; k, vField, err = lpDecoder.NextField() {
-			fields[string(k)] = vField.Interface()
+			// Rename "count" fields to "total"
+			key := string(k)
+			if key == "count" {
+				key = "total"
+			}
+			// Convert boolean values to floats
+			if vField.Interface() == true {
+				vFieldConverted = lineprotocol.MustNewValue(float64(1))
+				fields[key] = vFieldConverted.Interface()
+			} else if vField.Interface() == false {
+				vFieldConverted = lineprotocol.MustNewValue(float64(0))
+				fields[key] = vFieldConverted.Interface()
+			} else {
+				fields[key] = vField.Interface()
+			}
 		}
 		if err != nil {
 			if !r.config.EnablePartialWrites {
