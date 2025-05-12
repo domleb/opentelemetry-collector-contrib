@@ -183,14 +183,19 @@ func (r *metricsReceiver) handleWrite(w http.ResponseWriter, req *http.Request) 
 			if key == "count" {
 				key = "total"
 			}
-			// Convert boolean values to floats
-			if vField.Interface() == true {
-				vFieldConverted = lineprotocol.MustNewValue(float64(1))
+
+			// Process the value based on its type
+			switch vField.Kind() {
+			case lineprotocol.Bool:
+				// Convert boolean values to floats
+				if vField.Interface() == true {
+					vFieldConverted = lineprotocol.MustNewValue(float64(1))
+				} else {
+					vFieldConverted = lineprotocol.MustNewValue(float64(0))
+				}
 				fields[key] = vFieldConverted.Interface()
-			} else if vField.Interface() == false {
-				vFieldConverted = lineprotocol.MustNewValue(float64(0))
-				fields[key] = vFieldConverted.Interface()
-			} else {
+			default:
+				// Use the raw value for other types
 				fields[key] = vField.Interface()
 			}
 		}
