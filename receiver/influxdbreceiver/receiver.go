@@ -194,6 +194,10 @@ func (r *metricsReceiver) handleWrite(w http.ResponseWriter, req *http.Request) 
 					vFieldConverted = lineprotocol.MustNewValue(float64(0))
 				}
 				fields[key] = vFieldConverted.Interface()
+			case lineprotocol.String:
+				// Convert string values to 0 (ensures metric appears in Mimir even though the value is lost)
+				vFieldConverted = lineprotocol.MustNewValue(float64(0.0))
+				fields[key] = vFieldConverted.Interface()
 			default:
 				// Use the raw value for other types
 				fields[key] = vField.Interface()
